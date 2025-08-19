@@ -14,8 +14,9 @@ REQUIRED_FIELDS = [
     "sepal length (cm)",
     "sepal width (cm)",
     "petal length (cm)",
-    "petal width (cm)"
+    "petal width (cm)",
 ]
+
 
 @app.route("/predict", methods=["POST"])
 def predict():

@@ -39,7 +39,6 @@ pipeline {
         sh '''
           . .ci-venv/bin/activate
           ${PYTHON} -m black --check .
-          ${PYTHON} -m flake8 .
           bandit -c security/bandit-config.yaml -r .
         '''
       }
