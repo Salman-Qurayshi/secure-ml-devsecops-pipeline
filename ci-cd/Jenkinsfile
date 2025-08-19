@@ -1,0 +1,153 @@
+pipeline {
+  agent any
+
+  environment {
+    IMAGE_NAME = "ml-flask-app"
+    COMMIT_SHA = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+    IMAGE_TAG  = "${IMAGE_NAME}:${COMMIT_SHA}"
+    PYTHON     = "${WORKSPACE}/.ci-venv/bin/python"
+    PIP        = "${WORKSPACE}/.ci-venv/bin/pip"
+  }
+
+  options {
+    timestamps()
+    ansiColor('xterm')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Set up Python tools') {
+      steps {
+        sh '''
+          python3 -m venv .ci-venv
+          . .ci-venv/bin/activate
+          ${PIP} install --upgrade pip
+          ${PIP} install -r requirements.txt || true   # app deps (ok if already built in container)
+          ${PIP} install black flake8 bandit
+        '''
+      }
+    }
+
+    stage('Lint & SAST') {
+      steps {
+        sh '''
+          . .ci-venv/bin/activate
+          ${PYTHON} -m black --check .
+          ${PYTHON} -m flake8 .
+          bandit -c security/bandit-config.yaml -r .
+        '''
+      }
+    }
+
+    stage('Dependency Scan (pip-audit)') {
+      steps {
+        sh '''
+          . .ci-venv/bin/activate
+          security/pip-audit.sh requirements.txt
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'ci-cd/pip-audit.json', onlyIfSuccessful: false
+        }
+      }
+    }
+
+    stage('Secrets Scan (gitleaks)') {
+      steps {
+        sh '''
+          mkdir -p ci-cd
+          gitleaks detect \
+            --config security/.gitleaks.toml \
+            --report-path ci-cd/gitleaks.json \
+            --report-format json \
+            --verbose
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'ci-cd/gitleaks.json', onlyIfSuccessful: false
+        }
+      }
+    }
+
+    stage('Build Docker Image') {
+      steps {
+        sh '''
+          docker build -t ${IMAGE_TAG} .
+          docker image ls | head -n 5
+        '''
+      }
+    }
+
+    stage('Container Scan (Trivy)') {
+      steps {
+        sh '''
+          security/trivy-scan.sh ${IMAGE_TAG}
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'ci-cd/trivy-report.*', onlyIfSuccessful: false
+        }
+      }
+    }
+
+    stage('SBOM (Syft)') {
+      steps {
+        sh '''
+          security/syft-sbom.sh ${IMAGE_TAG}
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'ci-cd/sbom.json', onlyIfSuccessful: false
+        }
+      }
+    }
+
+    stage('(Optional) Docker Bench - Advisory') {
+      when { expression { return false } } // flip to true when you want it
+      steps {
+        sh 'security/docker-bench.sh'
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'ci-cd/docker-bench.txt', onlyIfSuccessful: false
+        }
+      }
+    }
+
+    stage('Deploy to Staging (VPS)') {
+      when {
+        anyOf {
+          branch 'main'
+          branch 'master'
+        }
+      }
+      steps {
+        // Assumes Jenkins runs on the same VPS that hosts Docker/compose for staging
+        sh '''
+          docker compose pull || true
+          docker compose down || true
+          # make sure your docker-compose.yml uses ${IMAGE_TAG} or latest accordingly
+          docker compose up -d
+          docker ps
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      // Keep all CI artifacts
+      archiveArtifacts artifacts: 'ci-cd/*.json, ci-cd/*.txt', onlyIfSuccessful: false
+    }
+  }
+}

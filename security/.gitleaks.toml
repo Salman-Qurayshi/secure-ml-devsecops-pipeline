@@ -1,0 +1,13 @@
+title = "Default gitleaks config with a few allowlists"
+
+[allowlist]
+# Ignore common non-source dirs
+paths = [
+  '''^venv/''',
+  '''^\.venv/''',
+  '''^data/''',
+  '''^notebooks/''',
+  '''^__pycache__/'''
+]
+
+# Let gitleaks use builtin rules; nothing else needed here.

@@ -1,0 +1,7 @@
+venv/
+.ci-venv/
+__pycache__/
+*.pyc
+ci-cd/*.json
+ci-cd/*.txt
+data/*.pkl

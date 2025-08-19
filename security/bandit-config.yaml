@@ -1,0 +1,10 @@
+# Minimal Bandit config: fail on MEDIUM/ HIGH severity, skip venv & data
+skips: []
+exclude_dirs:
+  - venv
+  - .venv
+  - data
+  - notebooks
+  - __pycache__
+severity: "MEDIUM"
+confidence: "MEDIUM"
