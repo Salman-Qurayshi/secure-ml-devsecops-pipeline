@@ -49,7 +49,8 @@ pipeline {
       steps {
         sh '''
           . .ci-venv/bin/activate
-          pip-audit -r requirements.txt --format json --output ci-cd/pip-audit.json --exit-code 0
+          pip-audit -r requirements.txt -f json -o ci-cd/pip-audit.json --exit-code 0
+
         '''
       }
       post {
