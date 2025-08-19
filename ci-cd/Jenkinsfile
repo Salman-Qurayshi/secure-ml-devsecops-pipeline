@@ -5,9 +5,13 @@ pipeline {
     IMAGE_NAME = "ml-flask-app"
     COMMIT_SHA = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
     IMAGE_TAG  = "${IMAGE_NAME}:${COMMIT_SHA}"
+    VENV       = "${WORKSPACE}/.ci-venv"
     PYTHON     = "${WORKSPACE}/.ci-venv/bin/python"
     PIP        = "${WORKSPACE}/.ci-venv/bin/pip"
-    PATH = "${WORKSPACE}/ci-tools:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+    PATH       = "${WORKSPACE}/ci-tools:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+    GITLEAKS_VERSION = "8.18.4"
+    TRIVY_VERSION    = "0.52.2"
+    SYFT_VERSION     = "1.17.0"
   }
 
   options {
@@ -18,60 +22,65 @@ pipeline {
 
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
-    stage('Set up Tools') {
+    stage('Set up Python & Tools') {
       steps {
         sh '''
+          set -e
           python3 -m venv .ci-venv
           . .ci-venv/bin/activate
           ${PIP} install --upgrade pip
-          ${PIP} install -r requirements.txt || true
+          # Dev tools (no need to pin tightly)
           ${PIP} install black flake8 bandit pip-audit
 
-          mkdir -p ci-tools
+          mkdir -p ci-tools ci-cd
 
-          # ---------------------------
-          # Gitleaks
-          # ---------------------------
-          if [ ! -f ci-tools/gitleaks ]; then
-            echo "Installing Gitleaks..."
-            GITLEAKS_VERSION=8.18.4
-            curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
-              -o ci-tools/gitleaks.tar.gz
-            tar -xzf ci-tools/gitleaks.tar.gz -C ci-tools gitleaks
-            chmod +x ci-tools/gitleaks
-            rm ci-tools/gitleaks.tar.gz
+          # ---------- GITLEAKS ----------
+          if [ ! -x ci-tools/gitleaks ]; then
+            echo "Installing Gitleaks ${GITLEAKS_VERSION} ..."
+            curl -fL -o ci-tools/gitleaks.tgz \
+              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            tar -xzf ci-tools/gitleaks.tgz -C ci-tools gitleaks
+            chmod +x ci-tools/gitleaks || true
+            rm -f ci-tools/gitleaks.tgz
           fi
 
-          # ---------------------------
-          # Trivy
-          # ---------------------------
-          if [ ! -f ci-tools/trivy ]; then
-            echo "Installing Trivy..."
-            TRIVY_VERSION=0.52.2
-            curl -sSL https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz \
-              -o ci-tools/trivy.tar.gz
-            tar -xzf ci-tools/trivy.tar.gz -C ci-tools trivy
-            chmod +x ci-tools/trivy
-            rm ci-tools/trivy.tar.gz
+          # ---------- TRIVY ----------
+          if [ ! -x ci-tools/trivy ]; then
+            echo "Installing Trivy ${TRIVY_VERSION} ..."
+            curl -fL -o ci-tools/trivy.tgz \
+              "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+            tar -xzf ci-tools/trivy.tgz -C ci-tools trivy
+            chmod +x ci-tools/trivy || true
+            rm -f ci-tools/trivy.tgz
           fi
 
-          # ---------------------------
-          # Syft
-          # ---------------------------
-          if [ ! -f ci-tools/syft ]; then
-            echo "Installing Syft..."
-            SYFT_VERSION=1.17.0
-            curl -sSL https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz \
-              -o ci-tools/syft.tar.gz
-            tar -xzf ci-tools/syft.tar.gz -C ci-tools syft
-            chmod +x ci-tools/syft
-            rm ci-tools/syft.tar.gz
+          # ---------- SYFT ----------
+          if [ ! -x ci-tools/syft ]; then
+            echo "Installing Syft ${SYFT_VERSION} ..."
+            curl -fL -o ci-tools/syft.tgz \
+              "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+            tar -xzf ci-tools/syft.tgz -C ci-tools syft
+            chmod +x ci-tools/syft || true
+            rm -f ci-tools/syft.tgz
           fi
+        '''
+      }
+    }
+
+    stage('Tools Versions') {
+      steps {
+        sh '''
+          set +e
+          echo "=== Tool versions (local binaries) ==="
+          (./ci-tools/gitleaks --version || ./ci-tools/gitleaks version) 2>/dev/null || echo "gitleaks local not available"
+          ./ci-tools/trivy --version 2>/dev/null || echo "trivy local not available"
+          ./ci-tools/syft --version  2>/dev/null || echo "syft local not available"
+          echo "=== Python ==="
+          ${PYTHON} --version
+          . .ci-venv/bin/activate && pip --version
         '''
       }
     }
@@ -79,49 +88,75 @@ pipeline {
     stage('Lint & SAST') {
       steps {
         sh '''
+          set +e
           . .ci-venv/bin/activate
-          ${PYTHON} -m black --check . || true
-          ${PYTHON} -m flake8 . --exit-zero
-          bandit -c security/bandit-config.yaml -r . --exit-zero
+
+          # Black (check only)
+          ${PYTHON} -m black --check . > ci-cd/black.txt 2>&1 || true
+
+          # Flake8: exclude venv, tools, site-packages; keep it quiet in console
+          flake8 \
+            --exclude .ci-venv,ci-tools,**/.venv,**/site-packages,**/.git \
+            --ignore E501,W503 \
+            --statistics --count \
+            . > ci-cd/flake8.txt 2>&1 || true
+
+          # Bandit (non-blocking)
+          bandit -c security/bandit-config.yaml -r . --exit-zero > ci-cd/bandit.txt 2>&1 || true
         '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'ci-cd/black.txt, ci-cd/flake8.txt, ci-cd/bandit.txt',
+                           onlyIfSuccessful: false, allowEmptyArchive: true
+        }
       }
     }
 
     stage('Dependency Scan (pip-audit)') {
       steps {
         sh '''
+          set +e
           . .ci-venv/bin/activate
+          # This may fail to resolve for Py3.10 when requirements pin Py3.11-only wheels.
+          # It is NON-BLOCKING and we allow empty archive.
           pip-audit -r requirements.txt -f json -o ci-cd/pip-audit.json || true
         '''
       }
       post {
         always {
-          script {
-            if (fileExists('ci-cd/pip-audit.json')) {
-              archiveArtifacts artifacts: 'ci-cd/pip-audit.json', onlyIfSuccessful: false
-            } else {
-              echo "⚠️ pip-audit.json not generated. Skipping archive."
-            }
-          }
+          archiveArtifacts artifacts: 'ci-cd/pip-audit.json',
+                           onlyIfSuccessful: false, allowEmptyArchive: true
         }
       }
     }
 
-    stage('Secrets Scan (gitleaks)') {
+    stage('Secrets Scan (Gitleaks)') {
       steps {
         sh '''
-          mkdir -p ci-cd
-          ./ci-tools/gitleaks detect \
-            --config security/.gitleaks.toml \
-            --report-path ci-cd/gitleaks.json \
-            --report-format json \
-            --verbose \
-            --no-exit-code || true
+          set +e
+          # Try local binary first
+          if ./ci-tools/gitleaks version >/dev/null 2>&1 || ./ci-tools/gitleaks --version >/dev/null 2>&1; then
+            ./ci-tools/gitleaks detect \
+              --config security/.gitleaks.toml \
+              --report-path ci-cd/gitleaks.json \
+              --report-format json \
+              --no-exit-code --verbose || true
+          else
+            echo "Local gitleaks not available, using Docker fallback..."
+            docker run --rm -v "$PWD:/repo" -w /repo \
+              zricethezav/gitleaks:${GITLEAKS_VERSION} detect \
+              --config security/.gitleaks.toml \
+              --report-path ci-cd/gitleaks.json \
+              --report-format json \
+              --no-exit-code --verbose || true
+          fi
         '''
       }
       post {
         always {
-          archiveArtifacts artifacts: 'ci-cd/gitleaks.json', onlyIfSuccessful: false
+          archiveArtifacts artifacts: 'ci-cd/gitleaks.json',
+                           onlyIfSuccessful: false, allowEmptyArchive: true
         }
       }
     }
@@ -129,6 +164,7 @@ pipeline {
     stage('Build Docker Image') {
       steps {
         sh '''
+          set -e
           docker build -t ${IMAGE_TAG} .
           docker image ls | head -n 5
         '''
@@ -138,12 +174,22 @@ pipeline {
     stage('Container Scan (Trivy)') {
       steps {
         sh '''
-          ./ci-tools/trivy image --exit-code 0 --format json -o ci-cd/trivy-report.json ${IMAGE_TAG} || true
+          set +e
+          if ./ci-tools/trivy --version >/dev/null 2>&1; then
+            ./ci-tools/trivy image --exit-code 0 --format json -o ci-cd/trivy-report.json ${IMAGE_TAG} || true
+          else
+            echo "Local trivy not available, using Docker fallback..."
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:${TRIVY_VERSION} image --exit-code 0 \
+              --format json -o /tmp/trivy-report.json ${IMAGE_TAG} || true
+            docker cp $(docker ps -alq):/tmp/trivy-report.json ci-cd/trivy-report.json 2>/dev/null || true
+          fi
         '''
       }
       post {
         always {
-          archiveArtifacts artifacts: 'ci-cd/trivy-report.*', onlyIfSuccessful: false
+          archiveArtifacts artifacts: 'ci-cd/trivy-report.json',
+                           onlyIfSuccessful: false, allowEmptyArchive: true
         }
       }
     }
@@ -151,37 +197,42 @@ pipeline {
     stage('SBOM (Syft)') {
       steps {
         sh '''
-          ./ci-tools/syft ${IMAGE_TAG} -o json > ci-cd/sbom.json || true
+          set +e
+          if ./ci-tools/syft --version >/dev/null 2>&1; then
+            ./ci-tools/syft ${IMAGE_TAG} -o json > ci-cd/sbom.json || true
+          else
+            echo "Local syft not available, using Docker fallback..."
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:${SYFT_VERSION} \
+              ${IMAGE_TAG} -o json > ci-cd/sbom.json || true
+          fi
         '''
       }
       post {
         always {
-          archiveArtifacts artifacts: 'ci-cd/sbom.json', onlyIfSuccessful: false
+          archiveArtifacts artifacts: 'ci-cd/sbom.json',
+                           onlyIfSuccessful: false, allowEmptyArchive: true
         }
       }
     }
 
     stage('(Optional) Docker Bench - Advisory') {
-      when { expression { return false } }
+      when { expression { false } }
       steps {
-        sh 'security/docker-bench.sh || true'
+        sh 'security/docker-bench.sh > ci-cd/docker-bench.txt 2>&1 || true'
       }
       post {
         always {
-          archiveArtifacts artifacts: 'ci-cd/docker-bench.txt', onlyIfSuccessful: false
+          archiveArtifacts artifacts: 'ci-cd/docker-bench.txt',
+                           onlyIfSuccessful: false, allowEmptyArchive: true
         }
       }
     }
 
     stage('Deploy to Staging (VPS)') {
-      when {
-        anyOf {
-          branch 'main'
-          branch 'master'
-        }
-      }
+      when { anyOf { branch 'main'; branch 'master' } }
       steps {
         sh '''
+          set +e
           docker compose pull || true
           docker compose down || true
           docker compose up -d || true
@@ -193,7 +244,9 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: 'ci-cd/*.json, ci-cd/*.txt', onlyIfSuccessful: false
+      // Keep, but never fail the build if some reports were not produced
+      archiveArtifacts artifacts: 'ci-cd/*.json, ci-cd/*.txt',
+                       onlyIfSuccessful: false, allowEmptyArchive: true
     }
   }
 }
