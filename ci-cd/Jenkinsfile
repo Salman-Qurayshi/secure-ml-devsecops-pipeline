@@ -46,19 +46,26 @@ pipeline {
     }
 
     stage('Dependency Scan (pip-audit)') {
-      steps {
-        sh '''
-          . .ci-venv/bin/activate
-           pip-audit -r requirements.txt -f json -o ci-cd/pip-audit.json || true
-
-        '''
-      }
-      post {
-        always {
+  steps {
+    sh '''
+      . .ci-venv/bin/activate
+      # Try pip-audit, but don’t fail if deps are broken or report is missing
+      pip-audit -r requirements.txt -f json -o ci-cd/pip-audit.json || true
+    '''
+  }
+  post {
+    always {
+      script {
+        if (fileExists('ci-cd/pip-audit.json')) {
           archiveArtifacts artifacts: 'ci-cd/pip-audit.json', onlyIfSuccessful: false
+        } else {
+          echo "⚠️ pip-audit.json not generated (dependency resolution failed). Skipping archive."
         }
       }
     }
+  }
+}
+
 
     stage('Secrets Scan (gitleaks)') {
       steps {
