@@ -8,7 +8,6 @@ pipeline {
     PYTHON     = "${WORKSPACE}/.ci-venv/bin/python"
     PIP        = "${WORKSPACE}/.ci-venv/bin/pip"
     PATH = "${WORKSPACE}/ci-tools:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
-
   }
 
   options {
@@ -19,30 +18,58 @@ pipeline {
 
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
-stage('Set up Tools') {
-  steps {
-    sh '''
-      python3 -m venv .ci-venv
-      . .ci-venv/bin/activate
-      ${PIP} install --upgrade pip
-      ${PIP} install -r requirements.txt || true
-      ${PIP} install black flake8 bandit pip-audit
+    stage('Set up Tools') {
+      steps {
+        sh '''
+          # Python virtualenv
+          python3 -m venv .ci-venv
+          . .ci-venv/bin/activate
+          ${PIP} install --upgrade pip
+          ${PIP} install -r requirements.txt || true
+          ${PIP} install black flake8 bandit pip-audit
 
-      # Download gitleaks binary into ci-tools folder
-      mkdir -p ci-tools
-      if [ ! -f ci-tools/gitleaks ]; then
-        curl -sSL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64 \
-          -o ci-tools/gitleaks
-        chmod +x ci-tools/gitleaks
-      fi
-    '''
-  }
-}
+          # Create ci-tools folder
+          mkdir -p ci-tools
+
+          # ---------------------------
+          # Gitleaks
+          # ---------------------------
+          if [ ! -f ci-tools/gitleaks ]; then
+            echo "Installing Gitleaks..."
+            curl -sSL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64 \
+              -o ci-tools/gitleaks
+            chmod +x ci-tools/gitleaks
+          fi
+
+          # ---------------------------
+          # Trivy
+          # ---------------------------
+          if [ ! -f ci-tools/trivy ]; then
+            echo "Installing Trivy..."
+            curl -sSL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.52.2_Linux-64bit.tar.gz \
+              -o ci-tools/trivy.tar.gz
+            tar -xzf ci-tools/trivy.tar.gz -C ci-tools trivy
+            chmod +x ci-tools/trivy
+            rm ci-tools/trivy.tar.gz
+          fi
+
+          # ---------------------------
+          # Syft
+          # ---------------------------
+          if [ ! -f ci-tools/syft ]; then
+            echo "Installing Syft..."
+            curl -sSL https://github.com/anchore/syft/releases/latest/download/syft_Linux_x86_64.tar.gz \
+              -o ci-tools/syft.tar.gz
+            tar -xzf ci-tools/syft.tar.gz -C ci-tools syft
+            chmod +x ci-tools/syft
+            rm ci-tools/syft.tar.gz
+          fi
+        '''
+      }
+    }
 
     stage('Lint & SAST') {
       steps {
@@ -56,46 +83,43 @@ stage('Set up Tools') {
     }
 
     stage('Dependency Scan (pip-audit)') {
-  steps {
-    sh '''
-      . .ci-venv/bin/activate
-      # Try pip-audit, but don’t fail if deps are broken or report is missing
-      pip-audit -r requirements.txt -f json -o ci-cd/pip-audit.json || true
-    '''
-  }
-  post {
-    always {
-      script {
-        if (fileExists('ci-cd/pip-audit.json')) {
-          archiveArtifacts artifacts: 'ci-cd/pip-audit.json', onlyIfSuccessful: false
-        } else {
-          echo "⚠️ pip-audit.json not generated (dependency resolution failed). Skipping archive."
+      steps {
+        sh '''
+          . .ci-venv/bin/activate
+          pip-audit -r requirements.txt -f json -o ci-cd/pip-audit.json || true
+        '''
+      }
+      post {
+        always {
+          script {
+            if (fileExists('ci-cd/pip-audit.json')) {
+              archiveArtifacts artifacts: 'ci-cd/pip-audit.json', onlyIfSuccessful: false
+            } else {
+              echo "⚠️ pip-audit.json not generated. Skipping archive."
+            }
+          }
         }
       }
     }
-  }
-}
-
 
     stage('Secrets Scan (gitleaks)') {
-  steps {
-    sh '''
-      mkdir -p ci-cd
-      ./ci-tools/gitleaks detect \
-        --config security/.gitleaks.toml \
-        --report-path ci-cd/gitleaks.json \
-        --report-format json \
-        --verbose \
-        --no-exit-code || true
-    '''
-  }
-  post {
-    always {
-      archiveArtifacts artifacts: 'ci-cd/gitleaks.json', onlyIfSuccessful: false
+      steps {
+        sh '''
+          mkdir -p ci-cd
+          ./ci-tools/gitleaks detect \
+            --config security/.gitleaks.toml \
+            --report-path ci-cd/gitleaks.json \
+            --report-format json \
+            --verbose \
+            --no-exit-code || true
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'ci-cd/gitleaks.json', onlyIfSuccessful: false
+        }
+      }
     }
-  }
-}
-
 
     stage('Build Docker Image') {
       steps {
@@ -109,12 +133,12 @@ stage('Set up Tools') {
     stage('Container Scan (Trivy)') {
       steps {
         sh '''
-          security/trivy-scan.sh ${IMAGE_TAG} || true
+          ./ci-tools/trivy image --exit-code 0 --format json -o ci-cd/trivy-report.json ${IMAGE_TAG} || true
         '''
       }
       post {
         always {
-          archiveArtifacts artifacts: 'ci-cd/trivy-report.*', onlyIfSuccessful: false
+          archiveArtifacts artifacts: 'ci-cd/trivy-report.json', onlyIfSuccessful: false
         }
       }
     }
@@ -122,7 +146,7 @@ stage('Set up Tools') {
     stage('SBOM (Syft)') {
       steps {
         sh '''
-          security/syft-sbom.sh ${IMAGE_TAG} || true
+          ./ci-tools/syft packages docker:${IMAGE_TAG} -o json > ci-cd/sbom.json || true
         '''
       }
       post {
