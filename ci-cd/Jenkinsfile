@@ -20,12 +20,11 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '20'))
   }
 
+  stages {
     stage('Checkout') {
-  steps {
-    checkout scm
-    sh 'git lfs pull'
-  }
-}
+      steps { checkout scm }
+    }
+
     stage('Set up Python & Tools') {
       steps {
         sh '''
