@@ -4,4 +4,3 @@ __pycache__/
 *.pyc
 ci-cd/*.json
 ci-cd/*.txt
-data/*.pkl
