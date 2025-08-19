@@ -7,6 +7,8 @@ pipeline {
     IMAGE_TAG  = "${IMAGE_NAME}:${COMMIT_SHA}"
     PYTHON     = "${WORKSPACE}/.ci-venv/bin/python"
     PIP        = "${WORKSPACE}/.ci-venv/bin/pip"
+    PATH = "${WORKSPACE}/ci-tools:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+
   }
 
   options {
@@ -22,17 +24,25 @@ pipeline {
       }
     }
 
-    stage('Set up Python tools') {
-      steps {
-        sh '''
-          python3 -m venv .ci-venv
-          . .ci-venv/bin/activate
-          ${PIP} install --upgrade pip
-          ${PIP} install -r requirements.txt || true   # app deps (ignore errors if container will handle them)
-          ${PIP} install black flake8 bandit pip-audit
-        '''
-      }
-    }
+stage('Set up Tools') {
+  steps {
+    sh '''
+      python3 -m venv .ci-venv
+      . .ci-venv/bin/activate
+      ${PIP} install --upgrade pip
+      ${PIP} install -r requirements.txt || true
+      ${PIP} install black flake8 bandit pip-audit
+
+      # Download gitleaks binary into ci-tools folder
+      mkdir -p ci-tools
+      if [ ! -f ci-tools/gitleaks ]; then
+        curl -sSL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64 \
+          -o ci-tools/gitleaks
+        chmod +x ci-tools/gitleaks
+      fi
+    '''
+  }
+}
 
     stage('Lint & SAST') {
       steps {
@@ -68,23 +78,24 @@ pipeline {
 
 
     stage('Secrets Scan (gitleaks)') {
-      steps {
-        sh '''
-          mkdir -p ci-cd
-          gitleaks detect \
-            --config security/.gitleaks.toml \
-            --report-path ci-cd/gitleaks.json \
-            --report-format json \
-            --verbose \
-            --no-exit-code
-        '''
-      }
-      post {
-        always {
-          archiveArtifacts artifacts: 'ci-cd/gitleaks.json', onlyIfSuccessful: false
-        }
-      }
+  steps {
+    sh '''
+      mkdir -p ci-cd
+      ./ci-tools/gitleaks detect \
+        --config security/.gitleaks.toml \
+        --report-path ci-cd/gitleaks.json \
+        --report-format json \
+        --verbose \
+        --no-exit-code || true
+    '''
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: 'ci-cd/gitleaks.json', onlyIfSuccessful: false
     }
+  }
+}
+
 
     stage('Build Docker Image') {
       steps {
