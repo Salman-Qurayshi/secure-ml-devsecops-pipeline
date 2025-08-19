@@ -22,7 +22,9 @@ pipeline {
 
   stages {
     stage('Checkout') {
-      steps { checkout scm }
+      steps { checkout scm
+      sh 'git lfs pull'
+       }
     }
 
     stage('Set up Python & Tools') {
